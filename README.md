@@ -14,7 +14,6 @@
 
 ---
 
-### ⚠️ Problem in the Year 2080
 
 Welcome to 2080. Cities pulse with code. Brain implants stream ads into your dreams. You're connected, enhanced, optimised—until you're not.
 
