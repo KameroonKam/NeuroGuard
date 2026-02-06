@@ -1,10 +1,16 @@
 import os
 import json
-import sqlite3
-from time import sleep
+from typing import Dict, List, Tuple
+
+import pandas as pd
+import joblib
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
 
-FEATURE_COLUMNS = [
+FEATURE_COLUMNS: List[str] = [
     "sunlight_hours",
     "safety",
     "sleep_duration_hours",
@@ -12,106 +18,76 @@ FEATURE_COLUMNS = [
     "physical_activity_minutes",
     "daily_goal_progression",
     "hour",
-    "weekday"
+    "weekday",
 ]
 
-import pandas as pd
-with open("generated_sample_data.json", "r") as f:
-    sample_data = json.load(f)
-from sklearn.ensemble import RandomForestRegressor
-import joblib
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split
-# Load sample data
-df = pd.DataFrame(sample_data)
+DATA_PATH = os.path.join(os.path.dirname(__file__), "generated_sample_data.json")
 
-# Map labels to numeric for training
-# Converts the list of dictionaries into a DataFrame,
-# a table-like structure used by pandas for easy data handling.
-df["emotion_label"] = df["mental_state"]
 
-def prepare_data(df):
+def _load_training_dataframe() -> pd.DataFrame:
+    with open(DATA_PATH, "r", encoding="utf-8") as f:
+        sample_data = json.load(f)
+    df = pd.DataFrame(sample_data)
+    df["target"] = df["mental_state"]
+    return df
+
+
+def prepare_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
     X = df[FEATURE_COLUMNS]
-    y = df["emotion_label"]
+    y = df["target"]
     return X, y
 
 
-# random_state - responsible for picking random subsets of data or
-# features when building each tree in the forest
-# (42 is common but can be changed)
-def train_model(X, y):
-    model = RandomForestRegressor(random_state=42)
+def train_model(X: pd.DataFrame, y: pd.Series) -> RandomForestRegressor:
+    model = RandomForestRegressor(
+        n_estimators=300,
+        random_state=42,
+        n_jobs=-1,
+    )
     model.fit(X, y)
     joblib.dump(model, MODEL_PATH)
     return model
 
 
-def predict_emotion(model, input_dict):
-    input_df = pd.DataFrame([input_dict])
-    input_df = input_df[FEATURE_COLUMNS]  # Ensure correct column order
-    prediction = model.predict(input_df)[0]
-    return int(round(prediction))
-
-# X, y = prepare_data(df)
-
-# model = train_model(X, y)
-
-# new_input_data = {
-#     "sunlight_hours": 10,
-#     "safety": 75,
-#     "sleep_duration_hours": 7.5,
-#     "screen_time_minutes": 320,
-#     "physical_activity_minutes": 45,
-#     "daily_goal_progression": 70,
-#     "hour": 14,
-#     "weekday": 2
-# }
-
-# print("Sample of training features:\n", X.head())
-# print("\nSample of target labels:\n", y.head())
-
-# predicted_label = predict_emotion(model, new_input_data)
-# emotion_label_map = {0: "stressed", 1: "tired", 2: "neutral", 3: "happy"}
-# print(f"\nPredicted emotion label: {predicted_label}")
-# print(f"Predicted emotion: {emotion_label_map.get(predicted_label, 'Unknown')}")
-
-
-def retrain_model():
+def retrain_model(print_metrics: bool = True) -> RandomForestRegressor:
+    df = _load_training_dataframe()
     X, y = prepare_data(df)
-    model = train_model(X, y)
-    joblib.dump(model, MODEL_PATH)
-    print("Model retrained and saved.")
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    model = train_model(X_train, y_train)
+
+    if print_metrics:
+        preds = model.predict(X_test)
+        mae = mean_absolute_error(y_test, preds)
+        r2 = r2_score(y_test, preds)
+        print(f"Model retrained and saved to {MODEL_PATH}")
+        print(f"Validation MAE: {mae:.2f}  |  R²: {r2:.2f}")
     return model
 
 
-def load_model():
-    return joblib.load(MODEL_PATH)
+def load_model() -> RandomForestRegressor:
+    if os.path.exists(MODEL_PATH):
+        return joblib.load(MODEL_PATH)
+    return retrain_model(print_metrics=True)
 
 
-try:
+def _sanitize_input(input_dict: Dict) -> Dict:
+    safe = {}
+    for k in FEATURE_COLUMNS:
+        v = input_dict.get(k, 0)
+        try:
+            safe[k] = float(v)
+        except (TypeError, ValueError):
+            safe[k] = 0.0
+    return safe
+
+
+def get_mental_state(input_data: Dict) -> int:
     model = load_model()
-except FileNotFoundError:
-    X, y = prepare_data(df)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = train_model(X_train, y_train)
-    joblib.dump(model, MODEL_PATH)
+    safe = _sanitize_input(input_data)
 
-    # Evaluate on test set
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Validation accuracy: {accuracy:.2f}")
+    input_df = pd.DataFrame([safe])[FEATURE_COLUMNS]
+    pred = float(model.predict(input_df)[0])
 
-
-def get_mental_state(input_data):
-    model = load_model()
-
-    label = predict_emotion(model, input_data)
-    return label
-
-
-# y_pred = model.predict(X)
-# accuracy = accuracy_score(y, y_pred)
-
-print("NeuroGuard is now monitoring new user input. Type Ctrl+C to stop.\n")
-last_seen_id = None
-
+    pred = max(0.0, min(100.0, pred))
+    return int(round(pred))

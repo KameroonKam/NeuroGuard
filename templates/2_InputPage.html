@@ -4,18 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NeuroGuard - Provide Details</title>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400..900&family=Oswald:wght@200..700&display=swap" rel="stylesheet">
-  <style>
-    * {
-      box-sizing: border-box;
-    }
-    body::-webkit-scrollbar {
-    display: none;
-    }
 
+  <style>
+    * { box-sizing: border-box; }
+    body::-webkit-scrollbar { display: none; }
 
     body {
       margin: 0;
@@ -58,10 +55,7 @@
       gap: 20px;
     }
 
-    .input-group {
-      display: flex;
-      flex-direction: column;
-    }
+    .input-group { display: flex; flex-direction: column; }
 
     .input-group label {
       margin-bottom: 5px;
@@ -75,6 +69,11 @@
       color: #ff0057;
       font-size: 0.9em;
       border-radius: 6px;
+      outline: none;
+    }
+
+    .input-group input.invalid {
+      border-color: #ff4d4d;
     }
 
     .input-footer {
@@ -85,9 +84,7 @@
       margin-top: 2px;
     }
 
-    .textarea-group {
-      margin-top: 20px;
-    }
+    .textarea-group { margin-top: 20px; }
 
     textarea {
       width: 100%;
@@ -98,6 +95,11 @@
       border-radius: 6px;
       border: 2px solid #356eff;
       resize: none;
+      outline: none;
+    }
+
+    textarea.invalid {
+      border-color: #ff4d4d;
     }
 
     .submit-button {
@@ -111,15 +113,68 @@
       cursor: pointer;
       clip-path: polygon(0 0, 100% 0, 100% 80%, 95% 100%, 0 100%);
       align-self: flex-start;
+      font-family: 'Orbitron', sans-serif;
     }
 
-    .submit-button a{
-      font-family: 'Orbitron', sans-serif;
-      text-decoration: none;
-      color: white;
+    .submit-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.7;
+    }
+
+    details {
+      margin-top: 12px;
+      color: #aaa;
+      font-size: 0.9em;
+    }
+
+    details summary {
+      cursor: pointer;
+      color: #ddd;
+      font-size: 0.95em;
+    }
+
+    /* Remove number input arrows (Chrome, Edge, Safari) */
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    /* Remove number input arrows (Firefox) */
+    input[type=number] {
+      -moz-appearance: textfield;
+    }
+
+    /* Error banner */
+    .banner {
+      display: none;
+      border: 1px solid #ff4d4d;
+      background: rgba(255, 77, 77, 0.12);
+      color: #ffd6d6;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 0.9em;
+      line-height: 1.45;
+    }
+
+    .banner strong {
+      color: #ffb3b3;
+    }
+
+    /* Small per-field hint */
+    .field-error {
+      display: none;
+      margin-top: 6px;
+      font-size: 0.75em;
+      color: #ffb3b3;
+    }
+
+    .input-group.invalid .field-error {
+      display: block;
     }
   </style>
 </head>
+
 <body>
   <div class="left-panel">
     <h1>PLEASE<br>PROVIDE<br>DETAILS</h1>
@@ -128,76 +183,213 @@
   <div class="right-panel">
     <div class="form-grid" id="input-fields"></div>
 
+    <details>
+      <summary>What do these inputs mean?</summary>
+      <div style="margin-top:10px; line-height:1.6;">
+        <p><b>Sleep duration (hours):</b> How many hours you slept last night. Range: 3–10 (typical 4–9).</p>
+        <p><b>Current hour (0–23):</b> The time of day when you submit the form.</p>
+        <p><b>Goal progression (0–100):</b> How well your day is going. 0 = none, 100 = fully on track.</p>
+        <p><b>Weekday (0–6):</b> 0 = Monday … 6 = Sunday.</p>
+        <p><b>Sunlight hours (0–12):</b> Time spent outside in daylight.</p>
+        <p><b>Safety (0–100):</b> How safe/calm you feel. 0 = stressed, 100 = calm.</p>
+        <p><b>Screen time (minutes, 0–900):</b> Total daily screen time across devices.</p>
+        <p><b>Physical activity (minutes, 0–180):</b> Exercise/walking time.</p>
+      </div>
+    </details>
+
+    <!-- Error banner -->
+    <div class="banner" id="errorBanner"></div>
+
     <div class="textarea-group">
       <label for="feeling">How do you feel today?</label>
       <textarea id="feeling" placeholder="Make sure that your description is as detailed as possible"></textarea>
+      <div class="field-error" id="feelingError">Please write fewer than 100 words.</div>
     </div>
 
-    <button class="submit-button" onclick="submitAnswers()"><a href="{{url_for('results_page')}}">CONFIRM ANSWER</a></button>
+    <button class="submit-button" id="submitBtn" type="button" onclick="submitAnswers()">CONFIRM ANSWER</button>
+    <div id="loading" style="display:none; margin-top:12px; color:#aaa; font-size:0.9em;">
+      Processing your results... Please wait.
+    </div>
   </div>
 
   <script>
     const fields = [
-      { name: "sleep_duration", label: "Sleep Duration" },
-      { name: "hours", label: "Hours" },
-      { name: "goals", label: "Goal Progression" },
-      { name: "weekday", label: "Weekday" },
-      { name: "sunlight", label: "Sunlight Hours" },
-      { name: "safety", label: "Safety" },
-      { name: "screen", label: "Screen Time" },
-      { name: "activity", label: "Physical Activity" }
+      { name: "sleep_duration", label: "Sleep Duration (hours)", min: 3, max: 10, step: 0.5, required: true },
+      { name: "hours",          label: "Current Hour (0–23)",     min: 0, max: 23, step: 1,   required: true },
+      { name: "goals",          label: "Goal Progression (0–100)", min: 0, max: 100, step: 1, required: true },
+      { name: "weekday",        label: "Weekday (0=Mon … 6=Sun)",   min: 0, max: 6, step: 1,  required: true },
+      { name: "sunlight",       label: "Sunlight Hours (0–12)",     min: 0, max: 12, step: 1, required: true },
+      { name: "safety",         label: "Safety (0–100)",            min: 0, max: 100, step: 1,required: true },
+      { name: "screen",         label: "Screen Time (minutes, 0–900)", min: 0, max: 900, step: 10, required: true },
+      { name: "activity",       label: "Physical Activity (minutes, 0–180)", min: 0, max: 180, step: 5, required: true }
     ];
 
     const formGrid = document.getElementById("input-fields");
+    const errorBanner = document.getElementById("errorBanner");
 
     fields.forEach(field => {
       const group = document.createElement("div");
       group.className = "input-group";
       group.innerHTML = `
         <label for="${field.name}">${field.label} *</label>
-        <input type="text" id="${field.name}" name="${field.name}" maxlength="60" oninput="updateSymbolCount(this)">
+        <input
+          type="number"
+          id="${field.name}"
+          name="${field.name}"
+          min="${field.min}"
+          max="${field.max}"
+          step="${field.step}"
+          aria-describedby="${field.name}-err"
+        >
         <div class="input-footer">
-          <span>Symbol Count</span>
-          <span class="symbol-count">0/60</span>
+          <span>Range</span>
+          <span>${field.min}–${field.max}</span>
+        </div>
+        <div class="field-error" id="${field.name}-err">
+          Please enter a number in the range ${field.min}–${field.max}.
         </div>
       `;
       formGrid.appendChild(group);
+
+      // Live validation on input
+      const input = group.querySelector("input");
+      input.addEventListener("input", () => validateField(field));
+      input.addEventListener("blur",  () => validateField(field));
     });
 
-    function updateSymbolCount(input) {
-      const counter = input.parentElement.querySelector(".symbol-count");
-      counter.textContent = `${input.value.length}/60`;
-    }
-
-    function submitAnswers() {
-      const feelingText = document.getElementById("feeling").value;
-      const wordCount = feelingText.trim().split(/\s+/).filter(Boolean).length;
-      if (wordCount >= 100) {
-        alert(`Please write fewer than 100 words. You currently have ${wordCount}.`);
+    function showBanner(messages) {
+      if (!messages || messages.length === 0) {
+        errorBanner.style.display = "none";
+        errorBanner.innerHTML = "";
         return;
       }
+      errorBanner.style.display = "block";
+      errorBanner.innerHTML = `<strong>Please fix the following:</strong><br>${messages.map(m => `• ${m}`).join("<br>")}`;
+    }
 
+    function setGroupValidity(field, isValid, message) {
+      const input = document.getElementById(field.name);
+      const group = input.closest(".input-group");
+      if (!isValid) {
+        group.classList.add("invalid");
+        input.classList.add("invalid");
+        if (message) {
+          const err = document.getElementById(`${field.name}-err`);
+          if (err) err.textContent = message;
+        }
+      } else {
+        group.classList.remove("invalid");
+        input.classList.remove("invalid");
+      }
+    }
+
+    function validateField(field) {
+      const input = document.getElementById(field.name);
+      const raw = input.value;
+
+      if (field.required && (raw === null || raw === "")) {
+        setGroupValidity(field, false, `This field is required. Range ${field.min}–${field.max}.`);
+        return { ok: false, msg: `${field.label}: required` };
+      }
+
+      const value = Number(raw);
+      if (Number.isNaN(value)) {
+        setGroupValidity(field, false, `Please enter a valid number. Range ${field.min}–${field.max}.`);
+        return { ok: false, msg: `${field.label}: enter a number` };
+      }
+
+      if (value < field.min || value > field.max) {
+        setGroupValidity(field, false, `Out of range. Please use ${field.min}–${field.max}.`);
+        return { ok: false, msg: `${field.label}: must be ${field.min}–${field.max}` };
+      }
+
+      setGroupValidity(field, true);
+      return { ok: true };
+    }
+
+    function validateFeeling() {
+      const feeling = document.getElementById("feeling");
+      const feelingError = document.getElementById("feelingError");
+
+      const text = feeling.value || "";
+      const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+
+      // feeling is optional; only enforce max words if user wrote something
+      if (wordCount >= 100) {
+        feeling.classList.add("invalid");
+        feelingError.style.display = "block";
+        return { ok: false, msg: `Feeling text: please use fewer than 100 words (currently ${wordCount}).` };
+      }
+
+      feeling.classList.remove("invalid");
+      feelingError.style.display = "none";
+      return { ok: true };
+    }
+
+    function validateAll() {
+      const messages = [];
+
+      fields.forEach(field => {
+        const res = validateField(field);
+        if (!res.ok) messages.push(res.msg);
+      });
+
+      const feelingRes = validateFeeling();
+      if (!feelingRes.ok) messages.push(feelingRes.msg);
+
+      showBanner(messages);
+
+      // focus first invalid input for convenience
+      if (messages.length > 0) {
+        const firstInvalid = document.querySelector(".input-group.invalid input");
+        if (firstInvalid) firstInvalid.focus();
+        return false;
+      }
+      return true;
+    }
+
+    async function submitAnswers() {
+      // Clear old banner
+      showBanner([]);
+
+      // Validate before submit
+      if (!validateAll()) return;
+
+      // Collect data
       const data = {};
       fields.forEach(field => {
         data[field.name] = document.getElementById(field.name).value;
       });
-      data["feeling"] = feelingText;
+      data["feeling"] = document.getElementById("feeling").value;
 
-      // Отправляем данные на сервер
-      fetch("/submit", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(data)
-      })
-      .then(response => {
-        if (response.ok) {
-          window.location.href = "/results";
-        } else {
-          alert("Submission failed.");
+      const btn = document.getElementById("submitBtn");
+      const loading = document.getElementById("loading");
+
+      // UI: disable + show loading
+      btn.disabled = true;
+      if (loading) loading.style.display = "block";
+
+      try {
+        const response = await fetch("/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data)
+        });
+
+        if (!response.ok) {
+          throw new Error("Submission failed.");
         }
-      });
+
+        // Wait for JSON so session cookie is definitely set before redirect
+        const json = await response.json();
+        const redirectUrl = (json && json.redirect) ? json.redirect : "/results";
+        window.location.href = redirectUrl;
+
+      } catch (err) {
+        showBanner([err.message || "Submission failed."]);
+        btn.disabled = false;
+        if (loading) loading.style.display = "none";
+      }
     }
   </script>
 </body>

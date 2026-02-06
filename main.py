@@ -1,273 +1,251 @@
 from dotenv import load_dotenv
-import os
-import requests
-from ml_model import get_mental_state, retrain_model, MODEL_PATH
-import sqlite3
-import subprocess
-from time import sleep
-import time
-from flask import Flask, render_template, url_for, request, session, redirect
-
 load_dotenv()
+
+import os
+import sqlite3
+from typing import Dict, Any, Optional
+
+import requests
+from flask import Flask, render_template, request, session, jsonify, redirect
+
+from ml_model import get_mental_state, retrain_model, MODEL_PATH
+from SQLfile import create_user_tables
+
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
 
-# Global state (top-level, just below load_dotenv())
-latest_predicted_state = 0
-latest_suggestion_text = "Loading your personalised analysis..."
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={GEMINI_API_KEY}"
+# Use a real secret key in .env for sessions (fallback keeps dev working)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
 
 
-@app.route('/')
+# Gemini config (optional)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+MODEL_NAME = "models/gemini-2.5-flash"
+GEMINI_API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
+    if GEMINI_API_KEY
+    else None
+)
+
+
+def _db_connect():
+    # check_same_thread=False can help if you ever move to multi-threaded server
+    return sqlite3.connect("User_Data.db", check_same_thread=False)
+
+
+def _get_full_history() -> str:
+    with _db_connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT previous_suggestion FROM data WHERE previous_suggestion IS NOT NULL")
+        rows = cur.fetchall()
+        items = [row[0] for row in rows if row and row[0]]
+        return "\n- ".join(items)
+
+
+def _update_latest_row(mental_state: int, summary_text: str) -> None:
+    with _db_connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM data ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return
+        latest_id = row[0]
+        cur.execute(
+            "UPDATE data SET emotional_state = ?, previous_suggestion = ? WHERE id = ?",
+            (mental_state, summary_text.strip(), latest_id),
+        )
+        conn.commit()
+
+
+def _fallback_suggestions(mental_state: int, user_data: Dict[str, Any]) -> str:
+    # Simple offline tips when Gemini key is missing
+    if mental_state < 35:
+        return (
+            "1) Take a 10–15 minute screen break and do slow breathing (4 seconds in, 6 out) for 3 minutes.\n"
+            "2) Prioritise sleep tonight: aim for a consistent bedtime and reduce screens 30 minutes before bed.\n"
+            "3) Add a short walk outside (even 10 minutes) to reset attention and stress levels."
+        )
+    if mental_state < 70:
+        return (
+            "1) Do a quick body reset: stretch your neck/shoulders for 2 minutes and drink water.\n"
+            "2) Reduce screen time for the next hour (notifications off) and finish one small task.\n"
+            "3) Get daylight if possible and add 15–20 minutes of light activity."
+        )
+    return (
+        "1) Maintain what works: keep sleep stable and take short breaks between focused sessions.\n"
+        "2) Protect focus: batch notifications and use a 25/5 timer (25 min work, 5 min break).\n"
+        "3) Do something restorative today (walk, journaling, or a calm hobby) to prevent burnout."
+    )
+
+
+def _call_gemini(prompt: str) -> Optional[str]:
+    if not GEMINI_API_URL:
+        return None
+
+    try:
+        resp = requests.post(
+            GEMINI_API_URL,
+            headers={"Content-Type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20,
+        )
+    except Exception:
+        return None
+
+    if resp.status_code != 200:
+        return None
+
+    data = resp.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return None
+
+
+def generate_suggestions(mental_state: int, user_data: Dict[str, Any], history_text: str = "") -> str:
+    # If no Gemini key, return offline tips
+    if not GEMINI_API_URL:
+        return _fallback_suggestions(mental_state, user_data)
+
+    prompt = (
+        "You are NeuroGuard, an advanced mental wellness AI from the year 2080.\n"
+        "Offer exactly three personalised tips to help the user improve or stabilise their mental well-being.\n"
+        "Each tip must be practical and concise. Respond with a numbered list only. Use British spelling.\n\n"
+        f"Estimated mental state score: {mental_state}/100\n"
+        f"Weekday: {user_data.get('weekday')}\n"
+        f"Sleep: {user_data.get('sleep_duration_hours')} hours\n"
+        f"Screen time: {user_data.get('screen_time_minutes')} minutes\n"
+        f"Physical activity: {user_data.get('physical_activity_minutes')} minutes\n"
+        f"Safety perception: {user_data.get('safety')}/100\n"
+        f"Sunlight exposure: {user_data.get('sunlight_hours')} hours\n"
+        f"Hour of day: {user_data.get('hour')}\n"
+        f"Daily goal progress: {user_data.get('daily_goal_progression')}/100\n"
+    )
+
+    if history_text:
+        prompt += f"\nUser history (previous advice):\n- {history_text}\n"
+
+    text = _call_gemini(prompt)
+    return text if text else _fallback_suggestions(mental_state, user_data)
+
+
+def summarise_for_history(suggestion_text: str) -> str:
+    if not GEMINI_API_URL:
+        first_line = suggestion_text.splitlines()[0].strip() if suggestion_text else ""
+        return first_line[:200] if first_line else "Offline summary saved."
+
+    summary_prompt = (
+        "Summarise the following mental wellness advice into one short paragraph to store as historical context. "
+        "Return only the summary, no title.\n\n"
+        f"{suggestion_text}"
+    )
+    text = _call_gemini(summary_prompt)
+    return text if text else "Summary generation failed."
+
+
+@app.route("/")
 def home():
     return render_template("1_mainPage.html")
 
-@app.route('/input')
+
+@app.route("/input")
 def input_page():
     return render_template("2_InputPage.html")
 
-@app.route('/results')
+
+@app.route("/reset")
+def reset():
+    # Clears the last result so a new run starts cleanly
+    session.clear()
+    return redirect("/")
+
+
+@app.route("/results")
 def results_page():
-    return render_template("3_ResultPage.html", value1=latest_predicted_state, value2=latest_suggestion_text)
+    predicted = session.get("predicted_state")
+    suggestion = session.get("suggestion_text")
+
+    # If user opens /results directly without submitting, show friendly text
+    if predicted is None or suggestion is None:
+        return render_template(
+            "3_ResultPage.html",
+            value1=0,
+            value2="Submit your data to get results.",
+        )
+
+    return render_template("3_ResultPage.html", value1=predicted, value2=suggestion)
 
 
-
-
-@app.route('/submit', methods=['POST'])
+@app.route("/submit", methods=["POST"])
 def handle_submission():
-    global latest_predicted_state, latest_suggestion_text
-    data = request.get_json()
+    data = request.get_json(force=True) or {}
 
-    print("Received submission:", data)
+    # Build ML input (use the keys the frontend sends)
+    latest_data = {
+        "sleep_duration_hours": float(data.get("sleep_duration", 0) or 0),
+        "screen_time_minutes": int(data.get("screen", 0) or 0),
+        "physical_activity_minutes": int(data.get("activity", 0) or 0),
+        "hour": int(data.get("hours", 0) or 0),  # frontend key: "hours"
+        "weekday": int(data.get("weekday", 0) or 0),
+        "sunlight_hours": int(data.get("sunlight", 0) or 0),
+        "safety": int(data.get("safety", 0) or 0),
+        "daily_goal_progression": int(data.get("goals", 0) or 0),
+    }
 
-    with sqlite3.connect("User_Data.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
+    # Optional: mark session as "processing" so /results could show a loading state if you add it later
+    session["predicted_state"] = None
+    session["suggestion_text"] = None
+
+    # Save raw input to DB (hour key is already fixed + include daily_goal_progress)
+    with _db_connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
             INSERT INTO data (
-                user, emotional_state, sunlight_hours, safety, sleep_duration_hours,
-                screen_time_minutes, physical_activity_minutes, hour, weekday
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "default_user",
-            None,
-            data.get("sunlight"),
-            data.get("safety"),
-            data.get("sleep_duration"),
-            data.get("screen"),
-            data.get("activity"),
-            data.get("hour"),
-            data.get("weekday")
-        ))
+                user, emotional_state, sleep_duration_hours, screen_time_minutes,
+                physical_activity_minutes, hour, weekday, sunlight_hours, safety, daily_goal_progress
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "default_user",
+                None,
+                latest_data["sleep_duration_hours"],
+                latest_data["screen_time_minutes"],
+                latest_data["physical_activity_minutes"],
+                latest_data["hour"],
+                latest_data["weekday"],
+                latest_data["sunlight_hours"],
+                latest_data["safety"],
+                latest_data["daily_goal_progression"],
+            ),
+        )
         conn.commit()
 
-    latest_data = {
-        "sleep_duration_hours": float(data.get("sleep_duration", 0)),
-        "screen_time_minutes": int(data.get("screen", 0)),
-        "physical_activity_minutes": int(data.get("activity", 0)),
-        "hour": int(data.get("hours", 0)),
-        "weekday": int(data.get("weekday", 0)),
-        "sunlight_hours": int(data.get("sunlight", 0)),
-        "safety": int(data.get("safety", 0)),
-        "daily_goal_progression": int(data.get("goals", 0))
-    }
+    # Predict
+    predicted_state = get_mental_state(latest_data)
 
-    if latest_data:
-        predicted_state = get_mental_state(latest_data)
-        suggestion_text = generate_suggestions("No message provided", predicted_state, latest_data)
+    # Suggestions (Gemini or offline)
+    history_text = _get_full_history()
+    suggestion_text = generate_suggestions(predicted_state, latest_data, history_text=history_text)
 
-        # Store for result page
-        latest_predicted_state = predicted_state
-        latest_suggestion_text = suggestion_text
+    # Store in session so /results can show it reliably
+    session["predicted_state"] = predicted_state
+    session["suggestion_text"] = suggestion_text
 
-        # Generate summary
-        summary_prompt = (
-            f"As NeuroGuard, summarise the following AI mental wellness advice into one short paragraph "
-            f"that can be stored as historical context for future use:\n\n{suggestion_text}\n"
-            "Only return the summary without any intro or title."
-        )
+    # Save summary to DB
+    summary_text = summarise_for_history(suggestion_text)
+    _update_latest_row(predicted_state, summary_text)
 
-        summary_response = requests.post(
-            GEMINI_API_URL,
-            headers={"Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": summary_prompt}]}]}
-        )
-
-        if summary_response.status_code == 200:
-            summary_result = summary_response.json()
-            summary_text = summary_result['candidates'][0]['content']['parts'][0]['text']
-        else:
-            summary_text = "Summary generation failed."
-
-        update_latest_row(predicted_state, summary_text)
-
-    print("Passing to results page:", latest_predicted_state, latest_suggestion_text)
-    # time.sleep(4)
-    return redirect(url_for('results_page', predicted=latest_predicted_state, suggestion=latest_suggestion_text))
-
-def get_full_history():
-    with sqlite3.connect("User_Data.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT previous_suggestion FROM data WHERE previous_suggestion IS NOT NULL")
-        rows = cursor.fetchall()
-        return "\n- ".join([row[0] for row in rows if row[0]])
+    # IMPORTANT: return redirect url so frontend waits for JSON and then navigates
+    # This avoids the "submit again / refresh" issue caused by session cookie timing.
+    return jsonify({"ok": True, "redirect": "/results"})
 
 
-def get_latest_user_data():
-    with sqlite3.connect("User_Data.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM data ORDER BY id DESC LIMIT 1")
-        row = cursor.fetchone()
-        if not row:
-            return None
-        # Map row to expected dictionary keys for get_mental_state
-        return {
-            "sleep_duration_hours": float(row[3]) if row[3] is not None else 0,
-            "screen_time_minutes": int(row[4]) if row[4] is not None else 0,
-            "physical_activity_minutes": int(row[5]) if row[5] is not None else 0,
-            "hour": int(row[6]) if row[6] is not None else 0,
-            "weekday": int(row[7]) if row[7] is not None else 0,
-            "sunlight_hours": int(row[8]) if row[8] is not None else 0,
-            "safety": int(row[9]) if row[9] is not None else 0,
-            "daily_goal_progression": 50  # Placeholder to satisfy expected columns
-        }
-
-
-def update_latest_row(mental_state, summary_text):
-    with sqlite3.connect("User_Data.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM data ORDER BY id DESC LIMIT 1")
-        row = cursor.fetchone()
-        if row:
-            latest_id = row[0]
-            cursor.execute(
-                "UPDATE data SET emotional_state = ?, previous_suggestion = ? WHERE id = ?",
-                (mental_state, summary_text.strip(), latest_id)
-            )
-            conn.commit()
-
-
-def generate_suggestions(user_message, mental_state, user_data, history_text=""):
-    prompt = (
-        f"You are NeuroGuard, an advanced mental wellness AI from the year 2080.\n"
-        f"Your top priority is to respond meaningfully to the user's emotional input.\n\n"
-        f"User's message (primary focus): \"{user_message}\"\n\n"
-        f"Contextual lifestyle data:\n"
-        f"- Estimated mental state score: {mental_state}/100\n"
-        f"- Weekday: {user_data.get('weekday')}\n"
-        f"- Hours of sleep: {user_data.get('sleep_duration_hours')}h\n"
-        f"- Screen time: {user_data.get('screen_time_minutes')} minutes\n"
-        f"- Physical activity: {user_data.get('physical_activity_minutes')} minutes\n"
-        f"- Safety perception: {user_data.get('safety')}/100\n"
-        f"- Sunlight exposure: {user_data.get('sunlight_hours')} hours\n"
-    )
-
-    history_section = f"\n\nHere is the user's historical wellness advice:\n- {history_text}" if history_text else ""
-    prompt += history_section + "\n\n" \
-              "Based on the emotional input and context, offer exactly **three personalised tips** to help the user improve or stabilise their mental well-being.\n" \
-              "Each suggestion must be:\n" \
-              "- Psychologically sound and empathetic\n" \
-              "- Inspired by mindfulness, behavioural science, or neuroscience\n" \
-              "- Practical, concise, and immediately useful\n\n" \
-              "Respond with a numbered list. Avoid greetings, introductions, or summaries. Use British spelling."
-
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-
-    response = requests.post(GEMINI_API_URL, headers=headers, json=data)
-
-    if response.status_code == 200:
-        result = response.json()
-        return result['candidates'][0]['content']['parts'][0]['text']
-    else:
-        return f"Error {response.status_code}: {response.text}"
-
-
-def main():
+def ensure_ready():
+    create_user_tables()
     if not os.path.exists(MODEL_PATH):
-        print("No trained model found. Training now...")
-        retrain_model()
-    else:
-        retrain = input("Type 'train' to retrain the model or press Enter to continue: ").strip().lower()
-        if retrain == "train":
-            retrain_model()
+        retrain_model(print_metrics=True)
 
-    # Launch the Flask app in a separate process
-    print("Starting web interface...")
-    # subprocess.Popen(["/usr/bin/python3", "web_data_receiver.py"])
-    sleep(2)  # wait briefly for Flask to start
-
-    print("NeuroGuard is now monitoring new user input. Type Ctrl+C to stop.\n")
-    with sqlite3.connect("User_Data.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM data ORDER BY id DESC LIMIT 1")
-        result = cursor.fetchone()
-        last_seen_id = result[0] if result else None
-
-    while True:
-        latest_data = get_latest_user_data()
-        if latest_data:
-            with sqlite3.connect("User_Data.db") as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT id FROM data ORDER BY id DESC LIMIT 1")
-                current_id = cursor.fetchone()[0]
-            if current_id != last_seen_id:
-                print("New input detected.")
-                print("Latest user data from DB:", latest_data)
-                predicted_state = get_mental_state(latest_data)
-                print("Predicted mental_state:", predicted_state)
-                history_text = get_full_history()
-                suggestion_text = generate_suggestions("No message provided", predicted_state, latest_data, history_text)
-                print("AI Suggestions:\n", suggestion_text)
-
-
-                # Generate a concise summary of today's suggestion
-                summary_prompt = (
-                    f"As NeuroGuard, summarise the following AI mental wellness advice into one short paragraph "
-                    f"that can be stored as historical context for future use:\n\n{suggestion_text}\n"
-                    "Only return the summary without any intro or title."
-                )
-
-                summary_response = requests.post(
-                    GEMINI_API_URL,
-                    headers={"Content-Type": "application/json"},
-                    json={"contents": [{"parts": [{"text": summary_prompt}]}]}
-                )
-
-                if summary_response.status_code == 200:
-                    summary_result = summary_response.json()
-                    summary_text = summary_result['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    summary_text = "Summary generation failed."
-
-                # Update the row
-                update_latest_row(predicted_state, summary_text)
-
-                # Print the summary
-                print("Summary stored in history:")
-                print(summary_text)
-
-                # Display full table
-                print("\nCurrent data table:")
-                with sqlite3.connect("User_Data.db") as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM data")
-                    for row in cursor.fetchall():
-                        print(row)
-
-                last_seen_id = current_id
-            sleep(2)
-
-def run_flask():
-    app.run(debug=True, port=4000, use_reloader=False)
 
 if __name__ == "__main__":
-    from multiprocessing import Process
-    flask_process = Process(target=run_flask)
-    flask_process.start()
-    main()
+    ensure_ready()
+    app.run(debug=True, port=4000)
