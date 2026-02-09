@@ -4,9 +4,9 @@
 
 ---
 
-## 🎥 Demo
+## Demo
 
-👉 https://github.com/user-attachments/assets/d4a73a8d-0e5e-4a19-b743-6662fb6ba338
+https://github.com/user-attachments/assets/d4a73a8d-0e5e-4a19-b743-6662fb6ba338
 
 
 
